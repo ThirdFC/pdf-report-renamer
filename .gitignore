@@ -1,0 +1,34 @@
+# Local environments, generated builds and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+*.spec
+*.log
+*.tmp
+
+# Local settings and secrets
+.env
+.env.*
+settings.json
+ocr.json
+report.json
+
+# Real documents and release binaries do not belong in Git
+*.pdf
+*.zip
+*.exe
+*.dll
+*.onnx
+*.pyd
+!/test_documents/**/*.pdf
+!/report_samples/*.pdf
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,76 @@
+# PDF 框选重命名
+
+Windows 本地 PDF OCR 重命名工具。支持拖入文件夹、预览第一页、框选识别，以及报告编号的自动定位与逐份人工审批。PDF 内容和 OCR 输入均在本机处理。
+
+## 下载运行
+
+在 [Releases](https://github.com/ThirdFC/pdf-report-renamer/releases) 下载 Windows x64 软件包，解压整个文件夹，运行 `PDF框选重命名.exe`。
+
+需要保留 `_internal` 文件夹。成品无需另装 Python、Adobe Acrobat 或 OCR 软件。当前版本为 **1.3.0**，在 Windows 11 x64 验证。
+
+## 报告编号审批
+
+1. 导入文件夹，勾选左侧“报告编号审批模式”。
+2. 首次点击“框选搜索范围”，框一个较大的区域，包含“报告编号”及右侧号码；尽量覆盖附近的委托编号、记录编号。
+3. 软件后台识别第一页，提取 `20250313-009` 这样的编号，并显示原始扫描截图。位置在范围内有偏移时仍会自动定位。
+4. 核对候选与截图，按自己配置的确认键，或点击“确认通过并重命名”。此时才改名并进入下一份。
+5. 发现异常可改候选、手动框选、重试或跳过。
+
+**预识别不会自动改名，每份都必须人工确认。** 模型分歧、交叉编号不一致、格式问题和重复名称会提示检查；已存在的文件不会被覆盖。原文件名已经匹配时，只记录本次审批。
+
+![报告编号审批界面，图中均为虚构测试报告](docs/review-mode.png)
+
+搜索范围与定位规则会保存。候选与审批状态只保留在本次会话，重启后需要重新预识别。格式或交叉核对通过仍可能有 OCR 错误，需要对照截图审批。
+
+## 手动 OCR 功能
+
+- 拖入文件夹，可包含子文件夹；预览并识别 PDF 第一页。
+- 矩形框选后自动 OCR；支持中英文、数字和人工修改。
+- PP-OCRv6、PP-OCRv4 模型切换与双模型候选对比，离线推理。
+- 选区独立以 300 / 450 / 600 DPI 渲染，支持对比度增强、黑白增强及轻微倾斜纠正。
+- OCR 结果去空格，可选删除首位符号；只删除开头的一个符号。
+- 跨文件保留预览缩放与浏览位置；普通手动模式切换文件会清除精细选区。
+- 可配置快捷键、重名保护与本次会话的撤销重命名。
+
+默认确认快捷键是 `Ctrl+Enter`，可在“设置”中修改。已有本地快捷键设置继续保留。
+
+完整说明见 [使用说明](使用说明.txt)。`report_samples` 和 `test_documents` 均为生成的测试文件，不含真实业务报告。
+
+## 源码运行与测试
+
+使用 Windows x64、Python 3.12：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r src\requirements.txt
+.\.venv\Scripts\python.exe src\app.py
+```
+
+运行测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest src\tests -q
+```
+
+1.3.0 发布时本机 **96 项测试通过**，并验证打包程序的预识别、人工确认、下一份候选、撤销及 PDF 字节内容保持。验证记录见 [packaged-review-check.json](docs/packaged-review-check.json)。用户实际扫描件的识别效果仍需核对。
+
+重新生成虚构样例：
+
+```powershell
+.\.venv\Scripts\python.exe src\make_samples.py
+.\.venv\Scripts\python.exe src\make_report_samples.py
+```
+
+## 构建 Windows 成品
+
+```powershell
+.\src\build.ps1
+```
+
+构建脚本在 `src/.venv` 中安装锁定的依赖，通过 PyInstaller 生成 `src/dist/PDF框选重命名`。分发时保留整个程序目录，并携带源码、使用说明与第三方许可。无需把大体积软件包或模型权重提交到 Git；成品通过 GitHub Releases 分发。
+
+源码结构和打包诊断参数见 [开发说明](src/开发说明.txt)。
+
+## 许可
+
+应用源码按 [AGPL-3.0-or-later](LICENSE) 提供。PyMuPDF、Qt/PySide6、RapidOCR、PP-OCR 模型等保留各自许可，见 [licenses](licenses)。成品 ZIP 包含应用源码和第三方许可说明。
