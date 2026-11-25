@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor,QPixmap,QImage
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
     QCheckBox,QDialog,QFormLayout,QLineEdit,QSpinBox,QFrame)
 
-from core import clean_name,signature
+from core import clean_name,signature,rename_pdf
 from report_review import ReportTemplateStore,ReportFinding,analyze_report
 
 
@@ -92,6 +92,13 @@ class ReportReviewMixin:
         self.preview_ready = False
         self.review_preview_signature = None
         self._result_programmatic = False
+        self.bulk_running = False
+        self.bulk_queue = []
+        self.bulk_result = None
+        self.review_batch_errors = {}
+        self.bulk_timer = QTimer(self)
+        self.bulk_timer.setSingleShot(True)
+        self.bulk_timer.timeout.connect(self.bulk_approve_step)
         self.review_timer = QTimer(self)
         self.review_timer.setSingleShot(True)
         self.review_timer.timeout.connect(self.review_pump)
@@ -111,21 +118,30 @@ class ReportReviewMixin:
         self.report_region_button = QPushButton('框选搜索范围')
         self.report_region_button.setCheckable(True)
         self.report_region_button.clicked.connect(self.choose_report_region)
-        rules = QPushButton('定位规则')
+        rules = self.report_rules_button = QPushButton('定位规则')
         rules.clicked.connect(self.edit_report_rules)
         first.addWidget(self.report_region_button,1)
         first.addWidget(rules)
         panel.addLayout(first)
         second = QHBoxLayout()
-        start = QPushButton('预识别')
+        start = self.report_start_button = QPushButton('预识别')
         start.clicked.connect(self.start_review)
-        stop = QPushButton('暂停')
+        stop = self.report_pause_button = QPushButton('暂停')
         stop.clicked.connect(self.stop_review)
-        retry = QPushButton('重试本份')
+        retry = self.report_retry_button = QPushButton('重试本份')
         retry.clicked.connect(self.retry_report)
         for button in (start,stop,retry):
             second.addWidget(button)
         panel.addLayout(second)
+        self.bulk_approve_button = QPushButton('一键通过所有待审批（0）')
+        self.bulk_approve_button.setEnabled(False)
+        self.bulk_approve_button.setToolTip('处理点击时已识别完成、无检查提示且未手动修改的所有待审批文件（包含筛选隐藏项）。需检查、已跳过和仍在识别的文件不处理。')
+        self.bulk_approve_button.clicked.connect(self.bulk_approve_clicked)
+        panel.addWidget(self.bulk_approve_button)
+        self.bulk_summary = QLabel()
+        self.bulk_summary.setWordWrap(True)
+        self.bulk_summary.hide()
+        panel.addWidget(self.bulk_summary)
         self.review_progress = QLabel('选择文件夹后可开始预识别')
         self.review_progress.setWordWrap(True)
         panel.addWidget(self.review_progress)
@@ -144,7 +160,7 @@ class ReportReviewMixin:
         self.manual_report_button = QPushButton('手动框选 / OCR 选项')
         self.manual_report_button.setCheckable(True)
         self.manual_report_button.toggled.connect(lambda checked:self.manual_ocr_panel.setVisible(checked or not self.report_mode.isChecked()))
-        skip = QPushButton('跳过本份')
+        skip = self.report_skip_button = QPushButton('跳过本份')
         skip.clicked.connect(self.skip_report)
         extra.addWidget(self.manual_report_button,1)
         extra.addWidget(skip)
@@ -195,6 +211,8 @@ class ReportReviewMixin:
         self.review_overrides.clear()
         self.review_pending.clear()
         self.review_active = None
+        self.review_batch_errors.clear()
+        self.bulk_summary.hide()
 
     def invalidate_report_results(self):
         was_running = self.review_running
@@ -204,6 +222,7 @@ class ReportReviewMixin:
         self.review_pending.clear()
         self.review_results.clear()
         self.review_overrides.clear()
+        self.review_batch_errors.clear()
         self.report_evidence.show_png(b'')
         self.report_candidates.clear()
         self.set_result_text('')
@@ -285,6 +304,8 @@ class ReportReviewMixin:
 
     def finding_issues(self,path,finding):
         issues = list(finding.notices)
+        if path in self.review_batch_errors:
+            issues.append('批量通过失败：'+self.review_batch_errors[path])
         if finding.error:
             return ['识别失败：'+finding.error]
         if finding.number:
@@ -314,6 +335,9 @@ class ReportReviewMixin:
             if state in ('已审批','已跳过'):
                 detail = state
                 color = '#16815c' if state == '已审批' else '#6d7d92'
+            elif path in self.review_overrides:
+                detail = '手动待确认'
+                color = '#a76505'
             elif finding:
                 issues = self.finding_issues(path,finding)
                 detail = ('需检查' if issues else '待审批')+(' · '+finding.number if finding.number else '')
@@ -328,6 +352,10 @@ class ReportReviewMixin:
         skipped = sum(self.review_states.get(p)=='已跳过' for p in self.report_paths())
         mode = '预识别中' if self.review_running and (self.review_active or self.review_pending) else ('已暂停' if not self.review_running else '预识别完成')
         self.review_progress.setText(f'{mode} {complete}/{total} · 审批 {approved} · 跳过 {skipped}')
+        if not self.bulk_running:
+            ready = len(self.bulk_approval_plan()) if enabled else 0
+            self.bulk_approve_button.setText(f'一键通过所有待审批（{ready}）')
+            self.bulk_approve_button.setEnabled(enabled and ready>0 and not self.report_region_button.isChecked())
         if enabled and self.current in self.review_results and self.preview_ready and self.current not in self.review_overrides:
             finding = self.review_results[self.current]
             issues = self.finding_issues(self.current,finding)
@@ -359,7 +387,6 @@ class ReportReviewMixin:
         for candidate in finding.candidates:
             self.report_candidates.addItem(candidate.number+'（'+candidate.sources[0].split(' / ')[0]+'）',candidate)
         self.report_candidates.blockSignals(False)
-        self.review_overrides.discard(self.current)
         self.show_report_candidate(0)
         if not finding.candidates:
             self.report_evidence.show_png(finding.fallback_evidence)
@@ -384,11 +411,13 @@ class ReportReviewMixin:
         self.show_report_candidate(index)
         if self.current:
             self.review_overrides.add(self.current)
+            self.refresh_review_badges()
 
     def mark_review_override(self,*args):
         if self.report_mode.isChecked() and self.current and not self._result_programmatic:
             self.review_overrides.add(self.current)
             self.review_status.setText('已手动修改候选，请核对编号截图或中间预览后确认')
+            self.refresh_review_badges()
 
     def set_result_text(self,text):
         previous = self._result_programmatic
@@ -413,12 +442,14 @@ class ReportReviewMixin:
         self.manual_report_button.setChecked(True)
         self.report_evidence.show_png(b'')
         self.review_status.setText('已切换为本份手动框选，请核对预览后确认')
+        self.refresh_review_badges()
         return False
 
     def choose_report_region(self,checked):
         if checked:
             self.review_status.setText('请在中间预览框一个较大范围，包含“报告编号”及右侧编号；可同时包含委托/记录编号')
         self.update_target()
+        self.refresh_review_badges()
 
     def edit_report_rules(self):
         dialog = ReportRulesDialog(self,self.report_template)
@@ -447,12 +478,13 @@ class ReportReviewMixin:
         self.review_results.pop(self.current,None)
         self.review_states.pop(self.current,None)
         self.review_overrides.discard(self.current)
+        self.review_batch_errors.pop(self.current,None)
         self.set_result_text('')
         self.report_evidence.show_png(b'')
         self.start_review()
 
     def review_can_approve(self):
-        return (not self.report_mode.isChecked() or
+        return not self.bulk_running and (not self.report_mode.isChecked() or
                 (self.preview_ready and not self.report_region_button.isChecked()
                  and self.review_states.get(self.current) not in ('已审批','已跳过')))
 
@@ -487,6 +519,7 @@ class ReportReviewMixin:
         self.review_states.pop(record.original,None)
         self.review_states[record.renamed] = '已审批'
         self.review_overrides.discard(record.original)
+        self.review_batch_errors.pop(record.original,None)
         self.review_pending = [p for p in self.review_pending if p != record.original]
 
     def review_after_undo(self,record):
@@ -495,6 +528,7 @@ class ReportReviewMixin:
             self.review_results[record.original] = finding
         self.review_states.pop(record.renamed,None)
         self.review_states.pop(record.original,None)
+        self.review_batch_errors.pop(record.renamed,None)
 
     def advance_report(self):
         start = self.files.currentRow()+1
@@ -526,3 +560,116 @@ class ReportReviewMixin:
         close.clicked.connect(dialog.accept)
         layout.addWidget(close)
         dialog.exec()
+
+    def bulk_approval_plan(self):
+        plan = []
+        for path in self.report_paths():
+            finding = self.review_results.get(path)
+            if (self.review_states.get(path) in ('已审批','已跳过') or path in self.review_overrides
+                    or not finding or finding.error or not finding.number or finding.file_signature is None):
+                continue
+            if self.finding_issues(path,finding):
+                continue
+            plan.append((path,finding.number,finding.file_signature))
+        return plan
+
+    def bulk_approve_clicked(self):
+        if self.bulk_running:
+            self.finish_bulk_approval(cancelled=True)
+        else:
+            self.start_bulk_approval()
+
+    def start_bulk_approval(self):
+        if not self.report_mode.isChecked() or self.bulk_running or self.report_region_button.isChecked():
+            return
+        plan = self.bulk_approval_plan()
+        if not plan:
+            self.bulk_summary.setText('当前没有可批量通过的待审批文件。')
+            self.bulk_summary.show()
+            return
+        self.bulk_queue = list(plan)
+        self.bulk_result = dict(total=len(plan),renamed=0,matched=0,failures=[],cancelled=False,remaining=0)
+        self.bulk_resume_review = self.review_running
+        self.bulk_running = True
+        self.stop_review()
+        self.generation += 1
+        self.ocr_generation += 1
+        self.bulk_summary.setText(f'正在批量通过 {len(plan)} 份文件…')
+        self.bulk_summary.setToolTip('')
+        self.bulk_summary.show()
+        names = ('report_mode','choose_button','settings_button','report_region_button','report_rules_button',
+                 'report_start_button','report_pause_button','report_retry_button','manual_report_button','report_skip_button',
+                 'files','search','recursive','previous_button','next_button','name_edit','result','report_candidates',
+                 'model_combo','dpi_combo','enhancement_combo','deskew_check','drop_symbol_check','undo_button','rename_button')
+        self.bulk_controls = [(getattr(self,name),getattr(self,name).isEnabled()) for name in names]
+        for control,_ in self.bulk_controls:
+            control.setEnabled(False)
+        self.bulk_approve_button.setEnabled(True)
+        self.bulk_approve_button.setText(f'停止批量通过（0/{len(plan)}）')
+        self.bulk_timer.start(0)
+
+    def bulk_approve_step(self):
+        if not self.bulk_running:
+            return
+        if not self.bulk_queue:
+            self.finish_bulk_approval()
+            return
+        path,number,expected = self.bulk_queue.pop(0)
+        try:
+            item = next((self.files.item(i) for i in range(self.files.count())
+                         if self.files.item(i).data(Qt.ItemDataRole.UserRole)==path),None)
+            if item is None:
+                raise ValueError('文件已不在当前列表中')
+            if signature(path) != expected:
+                raise ValueError('文件已变更，请重试本份并重新核对')
+            if self.review_states.get(path) in ('已审批','已跳过'):
+                raise ValueError('文件审批状态已变化')
+            if (number+'.pdf').casefold() == path.name.casefold():
+                self.review_states[path] = '已审批'
+                self.bulk_result['matched'] += 1
+            else:
+                record = rename_pdf(path,number)
+                self.history.append(record)
+                self.review_after_rename(record)
+                item.setData(Qt.ItemDataRole.UserRole,record.renamed)
+                item.setText(record.renamed.name)
+                item.setToolTip(str(record.renamed))
+                if self.current == path:
+                    self.current = record.renamed
+                    self.current_label.setText(record.renamed.name)
+                    self.current_label.setToolTip(str(record.renamed))
+                self.bulk_result['renamed'] += 1
+        except Exception as exc:
+            reason = str(exc) or type(exc).__name__
+            self.bulk_result['failures'].append(dict(file=str(path),reason=reason))
+            self.review_batch_errors[path] = reason
+        done = self.bulk_result['total']-len(self.bulk_queue)
+        self.bulk_approve_button.setText(f'停止批量通过（{done}/{self.bulk_result["total"]}）')
+        self.refresh_review_badges()
+        self.bulk_timer.start(0)
+
+    def finish_bulk_approval(self,cancelled=False,refresh_preview=True,resume_review=True):
+        if not self.bulk_running:
+            return
+        self.bulk_timer.stop()
+        self.bulk_result['cancelled'] = cancelled
+        self.bulk_result['remaining'] = len(self.bulk_queue)
+        self.bulk_queue.clear()
+        self.bulk_running = False
+        for control,enabled in self.bulk_controls:
+            control.setEnabled(enabled)
+        self.undo_button.setEnabled(bool(self.history))
+        result = self.bulk_result
+        summary = ('已停止批量通过' if cancelled else '批量通过完成')+f'：改名 {result["renamed"]}，原名匹配 {result["matched"]}，失败 {len(result["failures"])}'
+        if cancelled:
+            summary += f'，未处理 {result["remaining"]}'
+        self.bulk_summary.setText(summary)
+        self.bulk_summary.setToolTip('\n'.join(f'{entry["file"]}：{entry["reason"]}' for entry in result['failures']))
+        self.statusBar().showMessage(summary)
+        if refresh_preview and self.files.currentItem():
+            self.select_file(self.files.currentItem())
+        self.filter_list()
+        self.refresh_review_badges()
+        self.update_target()
+        if resume_review and self.bulk_resume_review:
+            self.start_review()

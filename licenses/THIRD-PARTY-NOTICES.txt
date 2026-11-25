@@ -1,4 +1,4 @@
-PDF 框选重命名 1.3.0
+PDF 框选重命名 1.3.1
 Copyright (C) 2026 PDF Region Rename contributors
 Application code: GNU Affero General Public License v3.0 or later.
 Full application source is supplied in ../source.

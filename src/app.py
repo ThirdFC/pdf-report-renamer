@@ -1,4 +1,4 @@
-"""PDF 框选重命名 v1.3.0 — AGPL-3.0-or-later."""
+"""PDF 框选重命名 v1.3.1 — AGPL-3.0-or-later."""
 import os
 import sys
 from pathlib import Path
@@ -193,7 +193,7 @@ def label(text, name=None):
 class MainWindow(ReportReviewMixin,QMainWindow):
     def __init__(self, shortcut_store=None):
         super().__init__()
-        self.setWindowTitle('PDF 框选重命名 1.3')
+        self.setWindowTitle('PDF 框选重命名 1.3.1')
         self.resize(1380, 880)
         self.setMinimumSize(1040, 690)
         self.setAcceptDrops(True)
@@ -431,12 +431,16 @@ class MainWindow(ReportReviewMixin,QMainWindow):
         self.update_review_approve_label()
 
     def open_settings(self):
+        if self.bulk_running:
+            return
         dialog = SettingsDialog(self, self.shortcut_store, self.shortcut_values)
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
             self.apply_shortcuts(dialog.values)
             self.statusBar().showMessage('快捷键设置已保存，立即生效')
 
     def navigate_file(self, direction):
+        if self.bulk_running:
+            return
         row = self.files.currentRow()
         if row < 0:
             row = -1 if direction > 0 else self.files.count()
@@ -511,21 +515,30 @@ class MainWindow(ReportReviewMixin,QMainWindow):
             self.ocr_status.setText(status)
 
     def choose_folder(self):
+        if self.bulk_running:
+            return
         folder = QFileDialog.getExistingDirectory(self, '选择包含 PDF 的文件夹', str(self.folder or Path.home()))
         if folder:
             self.load_folder(Path(folder))
 
     def dragEnterEvent(self, event):
+        if self.bulk_running:
+            return
         if event.mimeData().hasUrls() and any(Path(u.toLocalFile()).is_dir() for u in event.mimeData().urls() if u.isLocalFile()):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
+        if self.bulk_running:
+            return
         folders = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile() and Path(u.toLocalFile()).is_dir()]
         if folders:
             self.load_folder(folders[0])
             event.acceptProposedAction()
 
     def load_folder(self, folder):
+        if self.bulk_running:
+            self.statusBar().showMessage('请先停止批量通过，再切换文件夹')
+            return
         folder = Path(folder)
         if not folder.is_dir():
             return self.show_error('文件夹不存在或无法访问。')
@@ -609,6 +622,8 @@ class MainWindow(ReportReviewMixin,QMainWindow):
         self.submit(load, done, failed)
 
     def on_region(self, region):
+        if self.bulk_running:
+            return
         if self.handle_report_region(region):
             return
         self.region = region
@@ -726,6 +741,8 @@ class MainWindow(ReportReviewMixin,QMainWindow):
         QMessageBox.warning(self, '操作未完成', text)
 
     def closeEvent(self, event):
+        if self.bulk_running:
+            self.finish_bulk_approval(cancelled=True,refresh_preview=False,resume_review=False)
         self.stop_review()
         if self.pool.activeThreadCount():
             self.statusBar().showMessage('正在完成后台任务，请稍后再关闭窗口。')
@@ -735,9 +752,9 @@ class MainWindow(ReportReviewMixin,QMainWindow):
 
 
 def main():
-    if len(sys.argv)==4 and sys.argv[1]=='--self-test-reports':
+    if len(sys.argv)==4 and sys.argv[1] in ('--self-test-reports','--self-test-bulk'):
         from report_diagnostic import run
-        sys.exit(0 if run(MainWindow,sys.argv[2],sys.argv[3]) else 1)
+        sys.exit(0 if run(MainWindow,sys.argv[2],sys.argv[3],bulk=sys.argv[1]=='--self-test-bulk') else 1)
     if len(sys.argv) == 4 and sys.argv[1] == '--self-test':
         # Packaged-runtime diagnostic; always work on a temporary copy.
         import hashlib

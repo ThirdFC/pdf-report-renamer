@@ -221,3 +221,152 @@ def test_one_background_error_does_not_stop_the_queue(window):
     assert w.review_results[path].error
     w.review_pump()
     assert w.review_active.name == 'b.pdf'
+
+
+def ready_for_bulk(w):
+    w.stop_review()
+    w.review_active = None
+    w.review_pending.clear()
+    for index,path in enumerate(w.report_paths()):
+        w.review_results[path] = finding(path,f'20250313-{index+9:03}')
+    w.apply_report_result()
+    w.refresh_review_badges()
+
+
+def finish_bulk(w):
+    while w.bulk_running:
+        w.bulk_timer.stop()
+        w.bulk_approve_step()
+
+
+def test_bulk_approval_renames_all_ready_and_remains_undoable(window):
+    w = window
+    ready_for_bulk(w)
+    originals = {p:p.read_bytes() for p in w.report_paths()}
+    assert not w.history
+    w.bulk_approve_button.click()
+    w.bulk_timer.stop()
+    assert w.bulk_running and all(p.exists() for p in originals)
+    finish_bulk(w)
+    assert w.bulk_result['renamed'] == 2 and not w.bulk_result['failures']
+    assert len(w.history)==2
+    for index,(path,data) in enumerate(originals.items()):
+        target = path.with_name(f'20250313-{index+9:03}.pdf')
+        assert target.read_bytes()==data and w.review_states[target]=='已审批'
+    w.undo()
+    w.undo()
+    assert all(p.read_bytes()==data for p,data in originals.items())
+
+
+@pytest.mark.parametrize('excluded', ['need_check','skipped','manual'])
+def test_bulk_leaves_non_pending_rows_untouched(window, excluded):
+    w = window
+    ready_for_bulk(w)
+    other = w.report_paths()[1]
+    if excluded=='need_check':
+        w.review_results[other].notices.append('编号不一致')
+    elif excluded=='skipped':
+        w.review_states[other]='已跳过'
+    else:
+        w.review_overrides.add(other)
+    w.refresh_review_badges()
+    assert len(w.bulk_approval_plan())==1
+    w.start_bulk_approval()
+    finish_bulk(w)
+    assert other.exists() and w.bulk_result['renamed']==1
+
+
+def test_bulk_includes_hidden_pending_but_not_future_results(window):
+    w = window
+    ready_for_bulk(w)
+    other = w.report_paths()[1]
+    w.files.item(1).setHidden(True)
+    assert len(w.bulk_approval_plan())==2
+    later = w.review_results.pop(other)
+    w.start_bulk_approval()
+    w.bulk_timer.stop()
+    w.review_results[other]=later
+    finish_bulk(w)
+    assert w.bulk_result['total']==1 and other.exists()
+    assert w.review_states.get(other)!='已审批'
+
+
+def test_bulk_approves_ready_files_hidden_by_search(window):
+    w = window
+    ready_for_bulk(w)
+    directory=w.current.parent
+    w.search.setText('a.pdf')
+    assert w.files.item(1).isHidden()
+    w.start_bulk_approval()
+    finish_bulk(w)
+    assert w.bulk_result['renamed']==2
+    assert (directory/'20250313-010.pdf').exists()
+
+
+def test_manual_pending_flag_survives_reopening_cached_result(window):
+    w = window
+    ready_for_bulk(w)
+    path=w.current
+    w.review_overrides.add(path)
+    w.apply_report_result()
+    assert path in w.review_overrides
+    assert all(entry[0]!=path for entry in w.bulk_approval_plan())
+
+
+@pytest.mark.parametrize('failure', ['changed','target_exists'])
+def test_bulk_failure_keeps_file_and_continues(window, failure):
+    w = window
+    ready_for_bulk(w)
+    first,second = w.report_paths()
+    w.start_bulk_approval()
+    w.bulk_timer.stop()
+    if failure=='changed':
+        first.write_bytes(b'changed externally')
+    else:
+        first.with_name('20250313-009.pdf').write_bytes(b'existing target')
+    finish_bulk(w)
+    assert first.exists()
+    assert second.with_name('20250313-010.pdf').exists()
+    assert len(w.bulk_result['failures'])==1 and w.bulk_result['renamed']==1
+    assert w.review_states.get(first)!='已审批'
+    assert first in w.review_batch_errors
+    if failure=='target_exists':
+        assert first.with_name('20250313-009.pdf').read_bytes()==b'existing target'
+
+
+def test_bulk_duplicate_candidates_are_not_pending(window):
+    w = window
+    ready_for_bulk(w)
+    first,second = w.report_paths()
+    w.review_results[second]=finding(second,'20250313-009')
+    assert not w.bulk_approval_plan()
+    w.start_bulk_approval()
+    assert not w.bulk_running and not w.history and first.exists() and second.exists()
+
+
+def test_bulk_cancel_does_not_process_remaining_files(window):
+    w = window
+    ready_for_bulk(w)
+    first,second = w.report_paths()
+    w.start_bulk_approval()
+    w.bulk_timer.stop()
+    w.bulk_approve_step()
+    w.bulk_approve_clicked()
+    w.bulk_approve_step()  # An already queued timer callback cannot continue after stopping.
+    assert not w.bulk_running and w.bulk_result['cancelled']
+    assert w.bulk_result['remaining']==1
+    assert second.exists() and first.with_name('20250313-009.pdf').exists()
+    assert len(w.history)==1
+
+
+def test_bulk_existing_correct_name_only_marks_approved(window):
+    w = window
+    ready_for_bulk(w)
+    path = w.report_paths()[0]
+    w.review_results[path]=finding(path,'a')
+    w.review_states[w.report_paths()[1]]='已跳过'
+    before=path.read_bytes()
+    w.start_bulk_approval()
+    finish_bulk(w)
+    assert w.bulk_result['matched']==1 and w.bulk_result['renamed']==0
+    assert not w.history and path.read_bytes()==before and w.review_states[path]=='已审批'
