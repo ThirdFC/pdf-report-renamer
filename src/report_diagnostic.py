@@ -8,6 +8,39 @@ import hashlib
 from pathlib import Path
 
 
+def run_multiline(source,report):
+    """Exercise both bundled engines on synthetic scanned, wrapped identifiers."""
+    from core import OcrEngine,signature
+    from report_review import analyze_report,ReportTemplate
+    from ocr_processing import OcrOptions
+    import fitz
+    engine = OcrEngine()
+    results = []
+    try:
+        paths = sorted(Path(source).glob('*.pdf'))
+        assert len(paths)==4, '请传入 multiline_samples 四份虚构双行报告'
+        for index,path in enumerate(paths,1):
+            before = (signature(path),hashlib.sha256(path.read_bytes()).hexdigest())
+            with fitz.open(path) as document:
+                assert not document[0].get_text().strip()
+            for model in ('v6','v4'):
+                finding = analyze_report(engine,path,ReportTemplate(),OcrOptions(model=model))
+                assert finding.number==f'20250721-{index:03}', (path.name,model,finding.number)
+                assert '报告编号 / '+model in finding.candidates[0].sources
+                assert finding.candidates[0].evidence
+                if index==4:
+                    assert any('不一致' in n for n in finding.notices)
+                else:
+                    assert not finding.notices, finding.notices
+                results.append(dict(file=path.name,model=model,number=finding.number,notices=finding.notices))
+            assert before==(signature(path),hashlib.sha256(path.read_bytes()).hexdigest())
+        payload = dict(ok=True,scanned_pdfs=4,both_models=True,bytes_preserved=True,results=results)
+    except Exception as exc:
+        payload = dict(ok=False,error=str(exc),results=results)
+    Path(report).write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
+    return payload['ok']
+
+
 def run(window_class,source,report,bulk=False):
     os.environ['QT_QPA_PLATFORM'] = 'offscreen'
     from PySide6.QtWidgets import QApplication

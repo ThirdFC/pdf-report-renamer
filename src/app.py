@@ -1,4 +1,4 @@
-"""PDF 框选重命名 v1.3.1 — AGPL-3.0-or-later."""
+"""PDF 框选重命名 v1.3.2 — AGPL-3.0-or-later."""
 import os
 import sys
 from pathlib import Path
@@ -193,7 +193,7 @@ def label(text, name=None):
 class MainWindow(ReportReviewMixin,QMainWindow):
     def __init__(self, shortcut_store=None):
         super().__init__()
-        self.setWindowTitle('PDF 框选重命名 1.3.1')
+        self.setWindowTitle('PDF 框选重命名 1.3.2')
         self.resize(1380, 880)
         self.setMinimumSize(1040, 690)
         self.setAcceptDrops(True)
@@ -752,6 +752,9 @@ class MainWindow(ReportReviewMixin,QMainWindow):
 
 
 def main():
+    if len(sys.argv)==4 and sys.argv[1]=='--self-test-multiline':
+        from report_diagnostic import run_multiline
+        sys.exit(0 if run_multiline(sys.argv[2],sys.argv[3]) else 1)
     if len(sys.argv)==4 and sys.argv[1] in ('--self-test-reports','--self-test-bulk'):
         from report_diagnostic import run
         sys.exit(0 if run(MainWindow,sys.argv[2],sys.argv[3],bulk=sys.argv[1]=='--self-test-bulk') else 1)

@@ -1,0 +1,60 @@
+{
+  "ok": true,
+  "scanned_pdfs": 4,
+  "both_models": true,
+  "bytes_preserved": true,
+  "results": [
+    {
+      "file": "01-双行编号.pdf",
+      "model": "v6",
+      "number": "20250721-001",
+      "notices": []
+    },
+    {
+      "file": "01-双行编号.pdf",
+      "model": "v4",
+      "number": "20250721-001",
+      "notices": []
+    },
+    {
+      "file": "02-双行编号.pdf",
+      "model": "v6",
+      "number": "20250721-002",
+      "notices": []
+    },
+    {
+      "file": "02-双行编号.pdf",
+      "model": "v4",
+      "number": "20250721-002",
+      "notices": []
+    },
+    {
+      "file": "03-双行编号.pdf",
+      "model": "v6",
+      "number": "20250721-003",
+      "notices": []
+    },
+    {
+      "file": "03-双行编号.pdf",
+      "model": "v4",
+      "number": "20250721-003",
+      "notices": []
+    },
+    {
+      "file": "04-双行编号.pdf",
+      "model": "v6",
+      "number": "20250721-004",
+      "notices": [
+        "报告编号与委托编号或记录编号不一致"
+      ]
+    },
+    {
+      "file": "04-双行编号.pdf",
+      "model": "v4",
+      "number": "20250721-004",
+      "notices": [
+        "报告编号与委托编号或记录编号不一致"
+      ]
+    }
+  ]
+}

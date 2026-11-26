@@ -26,6 +26,7 @@ report.json
 *.pyd
 !/test_documents/**/*.pdf
 !/report_samples/*.pdf
+!/multiline_samples/*.pdf
 
 # OS/editor files
 .DS_Store

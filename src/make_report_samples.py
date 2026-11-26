@@ -36,5 +36,36 @@ def make_samples(folder):
             doc.save(folder/name,deflate=True)
     return folder
 
+
+def make_multiline_samples(folder):
+    """Separate image-only fixtures; keep the original five-file smoke set stable."""
+    folder = Path(folder)
+    folder.mkdir(parents=True,exist_ok=True)
+    font = lambda size:ImageFont.truetype('C:/Windows/Fonts/msyh.ttc',size)
+    for index in range(1,5):
+        image = Image.new('RGB',(1654,2339),'white')
+        draw = ImageDraw.Draw(image)
+        draw.text((140,140),'双行编号测试报告',fill='black',font=font(60))
+        draw.text((140,260),'虚构测试数据 · 非真实报告',fill='#65758c',font=font(32))
+        suffix = f'{index:03}'
+        draw.text((720,420 if index==2 else 445),'报告编号',fill='black',font=font(35))
+        first = 'AB-20250721-' if index==3 else 'HSZQXI-ZTJDQ-J0-HJW-'
+        second = suffix if index==3 else '20250721-'+suffix
+        draw.text((950,420),first,fill='black',font=font(34))
+        draw.text((1050,478),second,fill='black',font=font(34))
+        for label,y in [('委托编号',630),('记录编号',770)]:
+            draw.text((720,y),label,fill='black',font=font(35))
+            value = '009' if index==4 else suffix
+            draw.text((950,y),'AB-20250721-'+value,fill='black',font=font(34))
+        stream = io.BytesIO()
+        image.save(stream,format='PNG')
+        with fitz.open() as doc:
+            page = doc.new_page(width=595.28,height=841.89)
+            page.insert_image(page.rect,stream=stream.getvalue())
+            doc.save(folder/f'{index:02}-双行编号.pdf',deflate=True)
+    return folder
+
+
 if __name__ == '__main__':
     print(make_samples(Path(__file__).resolve().parent.parent/'report_samples'))
+    print(make_multiline_samples(Path(__file__).resolve().parent.parent/'multiline_samples'))

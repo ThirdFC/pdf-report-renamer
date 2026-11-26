@@ -10,7 +10,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from core import crop_first, signature
+from core import OcrLine, crop_first, signature
 from ocr_processing import prepare_crop
 
 
@@ -110,7 +110,7 @@ def group_rows(lines):
     return rows
 
 
-def span_box(row,start,end):
+def span_box(row,start,end,context=True):
     boxes = []
     offset = 0
     for line in row['lines']:
@@ -120,14 +120,116 @@ def span_box(row,start,end):
             x0,y0,x1,y1 = line.box
             # Retain a little prefix for context; leave enough margin for
             # proportional Chinese glyphs and slightly imprecise OCR boxes.
-            left = max(0,(start-offset)/max(1,len(text))-.12)
-            right = min(1,(end-offset)/max(1,len(text))+.04)
+            left = max(0,(start-offset)/max(1,len(text))-(.12 if context else 0))
+            right = min(1,(end-offset)/max(1,len(text))+(.04 if context else 0))
             boxes.append((x0+left*(x1-x0),y0,x0+right*(x1-x0),y1))
         offset = limit
     if not boxes:
         boxes = [l.box for l in row['lines']]
     return (min(b[0] for b in boxes),min(b[1] for b in boxes),
             max(b[2] for b in boxes),max(b[3] for b in boxes))
+
+
+def union_boxes(boxes):
+    return (min(b[0] for b in boxes),min(b[1] for b in boxes),
+            max(b[2] for b in boxes),max(b[3] for b in boxes))
+
+
+def report_fields(lines,anchor):
+    """Separate labels from values, then associate nearby lines within field fences.
+
+    A label may be centered beside two value lines. Row membership alone cannot
+    identify that field. Other labels fence the search both vertically and across
+    columns; unknown fields act as fences too, never as report anchors.
+    """
+    labels,values = [],[]
+    keywords = '|'.join(re.escape(k) for k in dict.fromkeys((anchor,'委托编号','记录编号')))
+    label_pattern = re.compile(keywords+r'|[\u4e00-\u9fff]{1,8}(?:编号|日期|名称|单位|时间|地址|电话|地点|人员|型号|规格)')
+    for row in group_rows(lines):
+        matches = list(label_pattern.finditer(row['text']))
+        for match in matches:
+            labels.append(dict(name=match.group(),box=span_box(row,*match.span(),context=False),
+                               confidence=float(np.mean([l.confidence for l in row['lines']]))))
+        # Slice at exact text positions, including when OCR returns label and
+        # value in one box, or splits a Chinese label across several boxes.
+        offset = 0
+        for line in row['lines']:
+            text = normalize(line.text)
+            cuts = {0,len(text)}
+            intervals = []
+            for match in matches:
+                a,b = max(0,match.start()-offset),min(len(text),match.end()-offset)
+                if a < b:
+                    intervals.append((a,b))
+                    cuts.update((a,b))
+            cuts = sorted(cuts)
+            for a,b in zip(cuts,cuts[1:]):
+                if a==b or any(a>=lo and b<=hi for lo,hi in intervals):
+                    continue
+                part = text[a:b]
+                if not part.strip(':：'):
+                    continue
+                x0,y0,x1,y1 = line.box
+                values.append(OcrLine(part,(x0+(x1-x0)*a/max(1,len(text)),y0,
+                                           x0+(x1-x0)*b/max(1,len(text)),y1),line.confidence))
+            offset += len(text)
+    fields = [[] for _ in labels]
+    unassigned = []
+    for value in values:
+        vx0,vy0,vx1,vy1 = value.box
+        vcy = (vy0+vy1)/2
+        eligible = []
+        for index,label in enumerate(labels):
+            x0,y0,x1,y1 = label['box']
+            height = max(1,y1-y0,vy1-vy0)
+            cy = (y0+y1)/2
+            top,bottom,right = cy-2.2*height,cy+2.2*height,float('inf')
+            for other in labels:
+                if other is label:
+                    continue
+                a,b,c,d = other['box']
+                ocy = (b+d)/2
+                same_column = min(x1,c)>max(x0,a) or abs(x0-a)<height
+                if same_column:
+                    if ocy < cy:
+                        top = max(top,(ocy+cy)/2)
+                    elif ocy > cy:
+                        bottom = min(bottom,(ocy+cy)/2)
+                elif a >= x1 and abs(ocy-cy)<=2.2*height:
+                    right = min(right,a)
+            if (top < vcy < bottom and vx0 >= x1-.3*height
+                    and vx1 <= right+.3*height):
+                eligible.append((abs(vcy-cy)/height,index))
+        if eligible:
+            eligible.sort()
+            # Equally close labels are ambiguous, so retain an unanchored
+            # fallback rather than silently making a batch-approvable result.
+            if len(eligible)==1 or eligible[1][0]-eligible[0][0]>.15:
+                fields[eligible[0][1]].append(value)
+                continue
+        unassigned.append(value)
+    return [(label,group_rows(parts)) for label,parts in zip(labels,fields)],group_rows(unassigned)
+
+
+def field_matches(rows,pattern):
+    for row in rows:
+        for match in pattern.finditer(row['text']):
+            yield match,row,match.span()
+    for first,second in zip(rows,rows[1:]):
+        # Only join incomplete adjacent value rows. Joining complete IDs can
+        # hide multiple candidates or fabricate a new valid-looking suffix.
+        if pattern.search(first['text']) or pattern.search(second['text']):
+            continue
+        a = union_boxes([l.box for l in first['lines']])
+        b = union_boxes([l.box for l in second['lines']])
+        height = max(first['height'],second['height'])
+        if second['cy']-first['cy']>2*height or min(a[2],b[2])<=max(a[0],b[0]):
+            continue
+        joined = dict(text=first['text']+second['text'],lines=first['lines']+second['lines'])
+        boundary = len(first['text'])
+        for match in pattern.finditer(joined['text']):
+            if match.start()<boundary<match.end():
+                yield match,joined,match.span()
 
 
 def evidence_png(image,box=None):
@@ -169,28 +271,25 @@ def extract_report(lines_by_model,template):
     fallback_box = None
     raw = []
     for model,lines in lines_by_model.items():
-        for row in group_rows(lines):
-            text = row['text']
-            raw.append(text)
-            label,position = '搜索范围',-1
-            for keyword in (anchor,'委托编号','记录编号'):
-                index = text.find(keyword)
-                if index >= 0:
-                    label,position = keyword,index+len(keyword)
-                    break
+        raw.extend(row['text'] for row in group_rows(lines))
+        fields,unassigned = report_fields(lines,anchor)
+        fields.append((None,unassigned))
+        for field,rows in fields:
+            label = field['name'] if field else '搜索范围'
+            boxes = ([field['box']] if field else [])+[l.box for r in rows for l in r['lines']]
             if label == anchor and fallback_box is None:
-                fallback_box = span_box(row,0,len(text))
-            for match in pattern.finditer(text):
-                if position >= 0 and match.start() < position:
-                    continue
+                fallback_box = union_boxes(boxes)
+            matches = field_matches(rows,pattern) if field else (
+                (m,r,m.span()) for r in rows for m in pattern.finditer(r['text']))
+            for match,row,span in matches:
                 valid = True
                 try:
                     datetime.datetime.strptime(match.group(1),'%Y%m%d')
                 except ValueError:
                     valid = False
-                occurrences.append((match.group(),label,model,
-                    float(np.mean([l.confidence for l in row['lines']])),
-                    span_box(row,match.start(),match.end()),valid))
+                scores = [l.confidence for l in row['lines']]+([field['confidence']] if field else [])
+                box = union_boxes(boxes) if field else span_box(row,*span)
+                occurrences.append((match.group(),label,model,float(np.mean(scores)),box,valid))
     primary = [o for o in occurrences if o[1] == anchor]
     ordered = primary+[o for o in occurrences if o[1] != anchor]
     candidates = {}
